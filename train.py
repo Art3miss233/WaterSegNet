@@ -9,7 +9,7 @@ from lib.dataloader import SegDataset
 import datetime
 from pathlib import Path
 import torchmetrics
-import torch.nn.functional as F
+from lib.predict import *
 
 class SegModel(LightningModule):
     def __init__(self, model, lr, optimizer_type, train_metrics, val_metrics, freeze_encoder=False):
@@ -18,9 +18,8 @@ class SegModel(LightningModule):
         self.lr = lr
         self.optimizer_type = optimizer_type
         self.freeze_encoder = freeze_encoder
-        self.criterion = nn.BCEWithLogitsLoss()
-        self.dice_loss = smp.losses.DiceLoss(smp.losses.BINARY_MODE)
-        self.accuracy = torchmetrics.classification.Accuracy(task="binary")
+        self.criterion = nn.BCEWithLogitsLoss() # Binary Cross Entropy Loss
+        self.dice_loss = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
         self.train_metric_tracker = train_metrics
         self.val_metric_tracker = val_metrics
 
@@ -35,7 +34,7 @@ class SegModel(LightningModule):
         optimizer = {
             "adam": torch.optim.Adam(self.model.parameters(), lr=self.lr),
             "sgd": torch.optim.SGD(self.model.parameters(), lr=self.lr),
-            "rmsprop": torch.optim.RMSprop(self.model.parameters(), lr=self.lr, momentum=0, weight_decay=0)
+            "rmsprop": torch.optim.RMSprop(self.model.parameters(), lr=self.lr)
         }.get(self.optimizer_type, None)
 
         if optimizer is None:
@@ -55,10 +54,11 @@ class SegModel(LightningModule):
         mask_pred = self(imgs)
 
         crit_loss = self.criterion(mask_pred.squeeze(1), gt_masks.float())
-        dice_loss = self.dice_loss(mask_pred, gt_masks)
+        dice_loss = self.dice_loss(mask_pred, gt_masks.float())
         loss = crit_loss + dice_loss
 
-        self.train_metric_tracker.update(mask_pred.squeeze(1), gt_masks)
+        mask_pred = (torch.sigmoid(mask_pred) > 0.5).squeeze(1).long()
+        self.train_metric_tracker.update(mask_pred, gt_masks)
         self.log("train_loss", loss)
         return loss
 
@@ -69,7 +69,9 @@ class SegModel(LightningModule):
         dice_loss = self.dice_loss(mask_pred.squeeze(1), gt_masks.float())
         loss = crit_loss + dice_loss
     
-        self.val_metric_tracker.update(mask_pred.squeeze(1), gt_masks)
+        mask_pred = (torch.sigmoid(mask_pred) > 0.5).squeeze(1).long()
+        
+        self.val_metric_tracker.update(mask_pred, gt_masks)
         self.log("val_loss", loss)
         return loss
     
@@ -83,13 +85,11 @@ class SegModel(LightningModule):
         val_metric_result= self.val_metric_tracker.compute_all()
         for key, value in val_metric_result.items():
             self.log(f"val.{key}", value, on_epoch=True)
-        self.val_metric_tracker.reset_all()
 
     def on_train_epoch_end(self):
         train_metric_result= self.train_metric_tracker.compute_all()
         for key, value in train_metric_result.items():
             self.log(f"train.{key}", value, on_epoch=True)
-        self.train_metric_tracker.reset_all()
         
 
 class SegDataModule(LightningDataModule):
@@ -146,11 +146,10 @@ if __name__ == "__main__":
     model = model.to(memory_format=torch.channels_last)
 
     metrics = torchmetrics.MetricCollection(
-        torchmetrics.Accuracy(task="binary"),
-        torchmetrics.Recall(task="binary"),
-        torchmetrics.Precision(task="binary"),
-        torchmetrics.JaccardIndex(task="binary",num_classes=2), # Intersection over Union
-        torchmetrics.F1Score(task="binary"), # Dice Coefficient
+        torchmetrics.Accuracy(task="binary", num_classes=1, multiclass=False),
+        torchmetrics.Recall(task="binary", num_classes=1, multiclass=False),
+        torchmetrics.Precision(task="binary", num_classes=1, multiclass=False),
+        torchmetrics.F1Score(task="binary", num_classes=1, multiclass=False), # Dice Coefficient
     )
 
     train_metrics = torchmetrics.MetricTracker(metrics)
