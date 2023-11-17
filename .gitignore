@@ -1,5 +1,6 @@
 checkpoints
-custom_dataset
 __pycache__
-waterSeg_dataset
 test
+datasets
+best_models
+segmentation_full_dataset

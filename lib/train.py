@@ -1,18 +1,24 @@
-import os
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from pytorch_lightning import LightningModule, LightningDataModule, Trainer
+from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import segmentation_models_pytorch as smp
-from lib.dataloader import SegDataset
+from lib.dataloader import SegDataset, SegDataModule
 import datetime
 from pathlib import Path
 import torchmetrics
-from lib.predict import *
+from pytorch_lightning.loggers import TensorBoardLogger
 
 class SegModel(LightningModule):
-    def __init__(self, model, lr, optimizer_type, train_metrics, val_metrics, freeze_encoder=False):
+    def __init__(self, 
+                 model, 
+                 lr, 
+                 optimizer_type, 
+                 train_metrics, 
+                 val_metrics, 
+                 test_metrics, 
+                 freeze_encoder=False
+                 ):
         super().__init__()
         self.model = model
         self.lr = lr
@@ -22,6 +28,7 @@ class SegModel(LightningModule):
         self.dice_loss = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
         self.train_metric_tracker = train_metrics
         self.val_metric_tracker = val_metrics
+        self.test_metric_tracker = test_metrics
 
     def forward(self, x):
         return self.model(x)
@@ -66,7 +73,7 @@ class SegModel(LightningModule):
         imgs, gt_masks = batch["image"], batch["mask"]
         mask_pred = self(imgs)
         crit_loss = self.criterion(mask_pred.squeeze(1), gt_masks.float())
-        dice_loss = self.dice_loss(mask_pred.squeeze(1), gt_masks.float())
+        dice_loss = self.dice_loss(mask_pred, gt_masks.float())
         loss = crit_loss + dice_loss
     
         mask_pred = (torch.sigmoid(mask_pred) > 0.5).squeeze(1).long()
@@ -75,11 +82,28 @@ class SegModel(LightningModule):
         self.log("val_loss", loss)
         return loss
     
+    def test_step(self, batch, batch_idx):
+        imgs, gt_masks = batch["image"], batch["mask"]
+
+        mask_pred = self(imgs)
+        crit_loss = self.criterion(mask_pred.squeeze(1), gt_masks.float())
+        dice_loss = self.dice_loss(mask_pred, gt_masks.float())
+        loss = crit_loss + dice_loss
+    
+        mask_pred = (torch.sigmoid(mask_pred) > 0.5).squeeze(1).long()
+        
+        self.test_metric_tracker.update(mask_pred, gt_masks)
+        self.log("test_loss", loss)
+        return loss
+    
     def on_validation_epoch_start(self):
         self.val_metric_tracker.increment()
 
     def on_train_epoch_start(self):
         self.train_metric_tracker.increment()
+
+    def on_test_epoch_start(self):
+        self.test_metric_tracker.increment()
 
     def on_validation_epoch_end(self):
         val_metric_result= self.val_metric_tracker.compute_all()
@@ -90,29 +114,13 @@ class SegModel(LightningModule):
         train_metric_result= self.train_metric_tracker.compute_all()
         for key, value in train_metric_result.items():
             self.log(f"train.{key}", value, on_epoch=True)
-        
+    
+    def on_test_epoch_end(self):
+        test_metric_result= self.test_metric_tracker.compute_all()
+        for key, value in test_metric_result.items():
+            self.log(f"test.{key}", value, on_epoch=True)
 
-class SegDataModule(LightningDataModule):
-    def __init__(self, train_dataset, val_dataset, batch_size):
-        super().__init__()
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
-        self.batch_size = batch_size
 
-    def train_dataloader(self):
-        return DataLoader(self.train_dataset, 
-                          batch_size=self.batch_size, 
-                          shuffle=True, 
-                          num_workers=os.cpu_count(), 
-                          )
-
-    def val_dataloader(self):
-        return DataLoader(self.val_dataset, 
-                          batch_size=self.batch_size, 
-                          num_workers=os.cpu_count(), 
-                          pin_memory=True, 
-                          drop_last=True, 
-                          )
 
 if __name__ == "__main__":
     root_dir = Path(
@@ -143,47 +151,63 @@ if __name__ == "__main__":
         activation=None,
     )
 
+
     model = model.to(memory_format=torch.channels_last)
 
     metrics = torchmetrics.MetricCollection(
         torchmetrics.Accuracy(task="binary", num_classes=1, multiclass=False),
         torchmetrics.Recall(task="binary", num_classes=1, multiclass=False),
         torchmetrics.Precision(task="binary", num_classes=1, multiclass=False),
-        torchmetrics.F1Score(task="binary", num_classes=1, multiclass=False), # Dice Coefficient
+        torchmetrics.F1Score(
+            task="binary", num_classes=1, multiclass=False
+        ),  # Dice Coefficient
     )
 
     train_metrics = torchmetrics.MetricTracker(metrics)
-    val_metrics = torchmetrics.MetricTracker(metrics)   
+    val_metrics = torchmetrics.MetricTracker(metrics)
+    test_metrics = torchmetrics.MetricTracker(metrics)
 
-    seg_model = SegModel(model, 
-                         lr=1e-3, 
-                         optimizer_type="rmsprop", 
-                         train_metrics=train_metrics, 
-                         val_metrics=val_metrics, 
-                         freeze_encoder=False
-                         )
-    data_module = SegDataModule(train_set, valid_set, batch_size=4)
 
-    timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M")
+    seg_model = SegModel(
+        model,
+        lr=1e-3,
+        optimizer_type="adam",
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        test_metrics=test_metrics,
+        freeze_encoder=False,
+    )
+    data_module = SegDataModule(train_set, valid_set, test_set, batch_size=16)
+    model_name = "unet_resnet34_adam_padded_b16"
 
     # Callbacks
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints/", 
-        save_top_k=1, 
-        monitor="val_loss", 
-        mode="min", 
-        filename="model-{}".format(timestamp)
-        )
-    early_stopping = EarlyStopping(monitor="val_loss", patience=10, verbose=True, mode="min")
-
-
-    trainer = Trainer(
-        max_epochs=4,
-        gpus=1 if torch.cuda.is_available() else 0,
-        callbacks=[checkpoint_callback, early_stopping],
-        precision=16,
+        dirpath="checkpoints/",
+        save_top_k=1,
+        monitor="val_loss",
+        mode="min",
+        filename="model-{}".format(model_name),
+    )
+    early_stopping = EarlyStopping(
+        monitor="val_loss", patience=10, verbose=True, mode="min"
     )
 
-    trainer.fit(seg_model, data_module)
+    tb_logger = TensorBoardLogger("lightning_logs/", name=model_name)
+
+    trainer = Trainer(
+        max_epochs=200,
+        gpus=1 if torch.cuda.is_available() else 0,
+        callbacks=[checkpoint_callback, early_stopping],
+        logger=tb_logger,
+        precision=16,  # Mixed precision training
+    )
+
+    # trainer.fit(seg_model, data_module)
+    trainer.test(
+        seg_model,
+        ckpt_path="checkpoints/model-unet_resnet34_adam_padded_b16.ckpt",
+        datamodule=data_module,
+        verbose=True,
+    )
 
 

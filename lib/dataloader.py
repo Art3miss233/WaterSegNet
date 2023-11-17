@@ -5,10 +5,9 @@ import numpy as np
 import torch
 
 from pathlib import Path
-
-def add_borders(img):
-    # TODO add borders to images
-    pass
+from pytorch_lightning import LightningDataModule
+from torch.utils.data import DataLoader
+import os
 
 
 class SegDataset(Dataset):
@@ -53,7 +52,10 @@ class SegDataset(Dataset):
 
     @staticmethod
     def preprocess(pil_img, is_mask, target_res=256):
-        resized_img = pil_img.resize(
+
+        squared_img = add_borders(pil_img)
+
+        resized_img = squared_img.resize(
             (target_res, target_res),
             resample=Image.NEAREST if is_mask else Image.BICUBIC,
         )
@@ -71,3 +73,46 @@ class SegDataset(Dataset):
             if (img > 1).any():
                 img = img / 255.0  # normalize to [0,1]
             return img
+
+class SegDataModule(LightningDataModule):
+    def __init__(self, train_dataset, val_dataset, test_dataset, batch_size):
+        super().__init__()
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
+        self.batch_size = batch_size
+
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, 
+                          batch_size=self.batch_size, 
+                          shuffle=True, 
+                          num_workers=os.cpu_count(), 
+                          )
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, 
+                          batch_size=self.batch_size, 
+                          num_workers=os.cpu_count(), 
+                          pin_memory=True, 
+                          drop_last=True, 
+                          )
+    def test_dataloader(self):
+        return DataLoader(self.test_dataset,
+                          num_workers=os.cpu_count(), 
+                          drop_last=True,
+                          )
+    
+
+def add_borders(pil_img):
+    w, h = pil_img.size
+    if w == h:
+        return pil_img
+    elif w > h:
+        padding = (0, (w - h) // 2)
+    else:
+        padding = ((h - w) // 2, 0)
+
+    new_size = max(w, h)
+    squared_img = Image.new("RGB" if pil_img.mode == "RGB" else "L", (new_size, new_size), 0)
+    squared_img.paste(pil_img, padding)
+    return squared_img
