@@ -40,6 +40,7 @@ class SegModel(LightningModule):
 
         optimizer = {
             "adam": torch.optim.Adam(self.model.parameters(), lr=self.lr),
+            "adamw": torch.optim.AdamW(self.model.parameters(), lr=self.lr),
             "sgd": torch.optim.SGD(self.model.parameters(), lr=self.lr),
             "rmsprop": torch.optim.RMSprop(self.model.parameters(), lr=self.lr)
         }.get(self.optimizer_type, None)
