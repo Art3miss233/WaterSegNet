@@ -6,3 +6,4 @@ best_models
 segmentation_full_dataset
 lightning_logs
 info.txt
+model_logs
