@@ -19,7 +19,7 @@ class SafePointFinder():
     def __init__(self, seg_chkpt_path, det_chpth_path):
         self.load_model(seg_chkpt_path)
         self.det_model = YOLO(det_chpth_path)
-        self.annotator = sv.BoxAnnotator(thickness=4, text_thickness=4, text_scale=2)
+        self.annotator = sv.BoxAnnotator(thickness=7, text_thickness=10, text_scale=3.4)
 
 
     def load_model(self, chkpt_path):
@@ -41,7 +41,8 @@ class SafePointFinder():
         Detect objects in an image and return a list of detections.
         """
         
-        img = cv2.imread(img_path)
+        img = cv2.imread(img_path)    
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         result = self.det_model.predict(img, conf=threshold)[0]
         detections = sv.Detections.from_ultralytics(result)
 
@@ -51,7 +52,7 @@ class SafePointFinder():
         ]
 
         self.processed_img = self.annotator.annotate(
-            scene=img, detections=detections, labels=labels
+            scene=rgb_img, detections=detections, labels=labels
         )
 
         return detections
@@ -141,7 +142,7 @@ class SafePointFinder():
         for i, img in enumerate(images):
             plt.figure(figsize=(10, 5))
             plt.imshow(img)
-            plt.title(titles[i])
+            # plt.title(titles[i])
             plt.axis("off")
             plt.show()
 
@@ -208,7 +209,7 @@ class SafePointFinder():
         cv2.putText(
             blended_image,
             "Safe point",
-            (closest_point[0] - 100, closest_point[1] + 150),
+            (closest_point[0] - 230, closest_point[1] + 150),
             cv2.FONT_HERSHEY_SIMPLEX,
             3,
             point_color,
@@ -244,17 +245,17 @@ class SafePointFinder():
         mask_255 = mask.astype(np.uint8) * 255
         detections = self.detect_objects(img_path, threshold=threshold)
 
-
+        start_time = time.time()
         safe_mask, dynamic_points = self.define_safe_mask(
             detections, mask_255, use_dynamic_points=use_dynamic_points
         )
-        start_time = time.time()
+        
         padded_mask = self.apply_padding(safe_mask, padding_factor)
 
         closest_point = self.find_closest_safe_point(padded_mask)
         end_time = time.time()
-        print(f"Time to find safe point: {end_time - start_time}")
-
+        total_time = end_time - start_time
+        print(f"Time to find safe point: {total_time}")
         if show_results:
             processed_mask = self.draw_processed_mask(
                 safe_mask, padded_mask, dynamic_points
@@ -265,7 +266,7 @@ class SafePointFinder():
 
             self.show_results(img_raw, mask_255, safe_mask, processed_mask, shaded_image)
 
-        return closest_point, mask_255
+        return closest_point, mask_255, total_time
 
         
 if __name__ == "__main__":
